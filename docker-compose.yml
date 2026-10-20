@@ -1,0 +1,296 @@
+# DevOps Challange by Seyed Abas Alavi     
+# Email :  seyed.abas.alavii@gmail.com
+name: padvish-kafka
+
+# ^^^^^^^^^^^^ docker-compose kafka  config anchor
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: ${CLUSTER_ID}
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENERS: CONTROLLER://:9093,BROKER://:9092
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:SSL,BROKER:SASL_SSL
+  KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
+  # SASL/PLAIN 
+  KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+  KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
+  KAFKA_LISTENER_NAME_BROKER_PLAIN_SASL_JAAS_CONFIG: >-
+    org.apache.kafka.common.security.plain.PlainLoginModule required
+    username="${ADMIN_USER}" password="${ADMIN_PASSWORD}"
+    user_${ADMIN_USER:-admin}="${ADMIN_PASSWORD}"
+    user_${APP_USER:-app}="${APP_PASSWORD}";
+  # TLS 
+  KAFKA_SSL_KEYSTORE_TYPE: PEM
+  KAFKA_SSL_TRUSTSTORE_TYPE: PEM
+  KAFKA_SSL_TRUSTSTORE_LOCATION: /certs/ca.crt
+  KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: https
+  
+  KAFKA_LISTENER_NAME_CONTROLLER_SSL_CLIENT_AUTH: required
+
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  KAFKA_REPLICA_SELECTOR_CLASS: org.apache.kafka.common.replica.RackAwareReplicaSelector
+  KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+
+  ADMIN_USER: ${ADMIN_USER}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+
+
+# ^^^^^^^^^^^ kafka service configuration anchor
+
+x-kafka-service: &kafka-service
+  image: apache/kafka:3.9.0
+  restart: unless-stopped
+  depends_on:
+    cert-generator:
+      condition: service_completed_successfully
+    volume-init:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ["CMD", "sh", "/opt/scripts/healthcheck.sh"]
+    interval: 15s
+    timeout: 20s
+    retries: 10
+    start_period: 30s
+
+# ^^^^^^^^^^^^ client-oriented kafka conf
+
+x-client-env: &client-env
+  BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+  KAFKA_USERNAME: ${APP_USER}
+  KAFKA_PASSWORD: ${APP_PASSWORD}
+  KAFKA_CA_FILE: /certs/ca.crt
+  TOPIC: ${TOPIC}
+
+# ^^^^^^^^^^^^  monitoring configuration anchor per kafka service
+
+x-observer: &observer
+  build: ./message-consumer
+  restart: unless-stopped
+  depends_on:
+    kafka-init:
+      condition: service_completed_successfully
+    alloy:
+      condition: service_started
+  volumes:
+    - kafka-certs:/certs:ro
+
+# ^^^^^^^^^^^  main docker-compose conf 
+
+services:
+  cert-generator:
+    build: ./certs
+    volumes:
+      - kafka-certs:/certs
+    restart: "no"
+
+  volume-init:
+    image: alpine:3.20
+    container_name: volume-init
+    restart: "no"
+    user: "0:0"
+    command: ["sh", "-c", "chmod 0777 /data/*"]
+    volumes:
+      - kafka-1-data:/data/kafka-1
+      - kafka-2-data:/data/kafka-2
+      - kafka-3-data:/data/kafka-3
+      - loki-data:/data/loki
+      - grafana-data:/data/grafana
+      - alloy-data:/data/alloy
+
+  kafka-1:
+    <<: *kafka-service
+    hostname: kafka-1
+    container_name: kafka-1
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_BROKER_RACK: rack-1
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka-1:9092
+      KAFKA_SSL_KEYSTORE_LOCATION: /certs/kafka-1.keystore.pem
+      BOOTSTRAP_SERVER: kafka-1:9092
+    volumes:
+      - kafka-certs:/certs:ro
+      - ./kafka/scripts:/opt/scripts:ro
+      - kafka-1-data:/var/lib/kafka/data
+
+  kafka-2:
+    <<: *kafka-service
+    hostname: kafka-2
+    container_name: kafka-2
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_BROKER_RACK: rack-2
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka-2:9092
+      KAFKA_SSL_KEYSTORE_LOCATION: /certs/kafka-2.keystore.pem
+      BOOTSTRAP_SERVER: kafka-2:9092
+    volumes:
+      - kafka-certs:/certs:ro
+      - ./kafka/scripts:/opt/scripts:ro
+      - kafka-2-data:/var/lib/kafka/data
+
+  kafka-3:
+    <<: *kafka-service
+    hostname: kafka-3
+    container_name: kafka-3
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_BROKER_RACK: rack-3
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka-3:9092
+      KAFKA_SSL_KEYSTORE_LOCATION: /certs/kafka-3.keystore.pem
+      BOOTSTRAP_SERVER: kafka-3:9092
+    volumes:
+      - kafka-certs:/certs:ro
+      - ./kafka/scripts:/opt/scripts:ro
+      - kafka-3-data:/var/lib/kafka/data
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: kafka-init
+    restart: "no"
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+    volumes:
+      - kafka-certs:/certs:ro
+      - ./kafka/scripts:/opt/scripts:ro
+    environment:
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      TOPIC: ${TOPIC}
+    entrypoint: ["sh", "/opt/scripts/init-topics.sh"]
+
+  message-producer:
+    build: ./message-producer
+    container_name: message-producer
+    restart: unless-stopped
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      alloy:
+        condition: service_started
+    volumes:
+      - kafka-certs:/certs:ro
+    environment:
+      <<: *client-env
+      SEND_INTERVAL_SECONDS: ${SEND_INTERVAL_SECONDS}
+
+  message-consumer:
+    build: ./message-consumer
+    container_name: message-consumer
+    restart: unless-stopped
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      alloy:
+        condition: service_started
+    volumes:
+      - kafka-certs:/certs:ro
+    environment:
+      <<: *client-env
+      GROUP_ID: ${CONSUMER_GROUP}
+
+  observer-kafka-1:
+    <<: *observer
+    container_name: observer-kafka-1
+    environment:
+      <<: *client-env
+      GROUP_ID: observer-kafka-1
+      NODE_LABEL: kafka-1
+      CLIENT_RACK: rack-1
+
+  observer-kafka-2:
+    <<: *observer
+    container_name: observer-kafka-2
+    environment:
+      <<: *client-env
+      GROUP_ID: observer-kafka-2
+      NODE_LABEL: kafka-2
+      CLIENT_RACK: rack-2
+
+  observer-kafka-3:
+    <<: *observer
+    container_name: observer-kafka-3
+    environment:
+      <<: *client-env
+      GROUP_ID: observer-kafka-3
+      NODE_LABEL: kafka-3
+      CLIENT_RACK: rack-3
+
+  # ---- Monitoring: Alloy (collector) -> Loki (storage) -> Grafana (UI) ----
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+
+  alloy:
+    image: grafana/alloy:v1.5.1
+    container_name: alloy
+    restart: unless-stopped
+    depends_on:
+      loki:
+        condition: service_started
+      volume-init:
+        condition: service_completed_successfully
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    restart: unless-stopped
+    depends_on:
+      loki:
+        condition: service_started
+      volume-init:
+        condition: service_completed_successfully
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/kafka-logs.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  kafka-certs:
+  kafka-1-data:
+  kafka-2-data:
+  kafka-3-data:
+  loki-data:
+  grafana-data:
+  alloy-data:
