@@ -54,6 +54,7 @@ Security:
 - **Raft metadata traffic:** dedicated `CONTROLLER` listener (`:9093`) over TLS with mutual authentication.
 - Users (see `.env`): `admin` (brokers, tooling) and `app` (producer/consumer/observers). Demo values — change them for real use.
 
+- since the project preps demo version, .env file that contains secretes and env variables is exposed.
 Resources: about 3 GB of free RAM is recommended (3 brokers + monitoring).
 
 
